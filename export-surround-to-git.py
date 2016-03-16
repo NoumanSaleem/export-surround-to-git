@@ -165,7 +165,7 @@ def get_lines_from_sscm_cmd(sscm_cmd):
 def find_all_branches_in_mainline_containing_path(mainline, path):
     # pull out lines from `lsbranch` that are of type baseline, mainline, or snapshot.
     # no sense in adding the `-d` switch, as `sscm ls` won't list anything for deleted branches.
-    cmd = 'sscm lsbranch -b"%s" -p"%s" | sed -r \'s/ \((baseline|mainline|snapshot)\)$//g\'' % (mainline, path)
+    cmd = 'sscm lsbranch -b"%s" -p"%s" | sed -E \'s/ \((baseline|mainline|snapshot)\)$//g\'' % (mainline, path)
     # FTODO this command yields branches that don't include the path specified.
     # should we filter them out here?  may increase efficiency to not deal with them later.
     # NOTE: don't use '-f' with this command, as it really restricts overall usage.
@@ -178,7 +178,7 @@ def find_all_files_in_branches_under_path(mainline, branches, path):
         sys.stderr.write("\n[*] Looking for files in branch '%s' ..." % branch)
 
         # use all lines from `ls` except for a few
-        cmd = 'sscm ls -b"%s" -p"%s" -r | grep -v \'Total listed files\' | sed -r \'s/unknown status.*$//g\'' % (branch, path)
+        cmd = 'sscm ls -b"%s" -p"%s" -r | grep -v \'Total listed files\' | sed -E \'s/unknown status.*$//g\'' % (branch, path)
         lines = get_lines_from_sscm_cmd(cmd)
 
         # directories are listed on their own line, before a section of their files
@@ -205,96 +205,128 @@ def find_all_file_versions(mainline, branch, path):
     cmd = 'sscm history "%s" -b"%s" -p"%s" | tail -n +5' % (file, branch, repo)
     lines = get_lines_from_sscm_cmd(cmd)
 
+    # lines = re.split('\|SPLIT\|', re.sub(r"(AM|PM)", r"\1|SPLIT|", " ".join(lines)))
+
+    fixed = []
+    commit = {}
+
+    for line in lines:
+        commentMatch = re.search("^ Comments -", line)
+        endMatch = re.search("(AM|PM)$", line)
+
+        if commentMatch:
+            commit['comment'] = re.sub("^ Comments \- ", "", line, count=1)
+        elif endMatch:
+            if 'data' in commit:
+                commit['data'] += re.sub("\n", " ", line)
+            else:
+                commit['data'] = line
+            fixed.append(commit)
+            commit = {}
+        else:
+            commit['data'] = re.sub("\n", " ", line)
+
+    # print("************")
+    # print("************")
+    # print(fixed)
+    # print("************")
+    # print("************")
+
     # this is complicated because the comment for a check-in will be on the line *following* a regex match
     versionList = []
     comment = None
     bFoundOne = False
-    for line in lines:
+    for line in fixed:
         #sys.stderr.write("\n=== Trying line = " + line)
 
-        result = histRegex.search(line)
+        result = histRegex.search(line['data'])
+
         if result:
             # we have a new match.
             #sys.stderr.write("\n******* line match!")
 
-            if bFoundOne:
+            # if bFoundOne:
                 # before processing this match, we need to commit the previously found version
-                versionList.append((timestamp, action, origFile, int(version), author, comment, data))
+                # versionList.append((timestamp, action, origFile, int(version), author, comment, data))
             # set bFoundOne once we've found our first version
-            bFoundOne = True
+            # bFoundOne = True
             action = result.group("action")
             origFile = result.group("from")
             to = result.group("to")
             author = result.group("author")
             version = result.group("version")
             timestamp = result.group("timestamp")
-            # reset comment
-            comment = None
+            if 'comment' in line:
+                comment = line['comment']
+            else:
+                comment = None
             if origFile and to:
                 # we're in a rename/move scenario
                 data = to
             else:
                 # we're (possibly) in a branch scenario
                 data = result.group("data")
-        else:
-            # no match.  this must be a comment line (or the start of a new history line, with a line break).
-            #sys.stderr.write("\n------- no line match")
 
-            if not comment:
-                # start of comment
-                comment = re.sub("^ Comments \- ", "", line, count=1)
-            else:
-                # continuation of comment
-                comment += "\n" + line
+            versionList.append((timestamp, action, origFile, int(version), author, comment, data))
+        # else:
+        #     # no match.  this must be a comment line (or the start of a new history line, with a line break).
+        #     #sys.stderr.write("\n------- no line match")
 
-                # check for a multi-line comment that is actually a version match
-                commentLines = [real_line for real_line in comment.split('\n') if real_line]
-                substrings = []
-                # '-1' on following line is because we don't need to check the last comment line again.
-                # (we just checked it above.)
-                for i in range(len(commentLines) - 1):
-                    substrings.append('\n'.join(commentLines[i:len(commentLines)]))
-                for substring in substrings:
-                    #sys.stderr.write("\n----- Trying substring = " + substring)
+        #     if not comment:
+        #         # start of comment
+        #         comment = re.sub("^ Comments \- ", "", line, count=1)
+        #     else:
+        #         # continuation of comment
+        #         comment += "\n" + line
 
-                    result = histRegex.search(substring)
-                    if result:
-                        # we have a new match
+        #         # check for a multi-line comment that is actually a version match
+        #         commentLines = [real_line for real_line in comment.split('\n') if real_line]
+        #         substrings = []
+        #         # '-1' on following line is because we don't need to check the last comment line again.
+        #         # (we just checked it above.)
+        #         for i in range(len(commentLines) - 1):
+        #             substrings.append('\n'.join(commentLines[i:len(commentLines)]))
+        #         for substring in substrings:
+        #             #sys.stderr.write("\n----- Trying substring = " + substring)
 
-                        # pull off end part of comment that we're recording as a version
-                        if i == 0:
-                            # using the entire comment
-                            comment = None
-                        else:
-                            # leaving behind the previous comment
-                            comment = '\n'.join(commentLines[0:i - 1])
+        #             result = histRegex.search(substring)
+        #             if result:
+        #                 # we have a new match
 
-                        if bFoundOne:
-                            # before processing this match, we need to commit the previously found version
-                            versionList.append((timestamp, action, origFile, int(version), author, comment, data))
-                        # set bFoundOne once we've found our first version
-                        bFoundOne = True
-                        action = result.group("action")
-                        origFile = result.group("from")
-                        to = result.group("to")
-                        author = result.group("author")
-                        version = result.group("version")
-                        timestamp = result.group("timestamp")
-                        # reset comment
-                        comment = None
-                        if origFile and to:
-                            # we're in a rename/move scenario
-                            data = to
-                        else:
-                            # we're (possibly) in a branch scenario
-                            data = result.group("data")
+        #                 # pull off end part of comment that we're recording as a version
+        #                 if i == 0:
+        #                     # using the entire comment
+        #                     comment = None
+        #                 else:
+        #                     # leaving behind the previous comment
+        #                     comment = '\n'.join(commentLines[0:i - 1])
 
-                        #sys.stderr.write("\n******* comment match! action = '" + str(action) + "' comment = '" + str(comment) + "'")
-                        break
+        #                 if bFoundOne:
+        #                     # before processing this match, we need to commit the previously found version
+        #                     versionList.append((timestamp, action, origFile, int(version), author, comment, data))
+        #                 # set bFoundOne once we've found our first version
+        #                 bFoundOne = True
+        #                 action = result.group("action")
+        #                 origFile = result.group("from")
+        #                 to = result.group("to")
+        #                 author = result.group("author")
+        #                 version = result.group("version")
+        #                 timestamp = result.group("timestamp")
+        #                 # reset comment
+        #                 comment = None
+        #                 if origFile and to:
+        #                     # we're in a rename/move scenario
+        #                     data = to
+        #                 else:
+        #                     # we're (possibly) in a branch scenario
+        #                     data = result.group("data")
+
+        #                 #sys.stderr.write("\n******* comment match! action = '" + str(action) + "' comment = '" + str(comment) + "'")
+        #                 break
 
     # before moving on, we need to commit the last found version
-    if bFoundOne:
-        versionList.append((timestamp, action, origFile, int(version), author, comment, data))
+    # if bFoundOne:
+        # versionList.append((timestamp, action, origFile, int(version), author, comment, data))
 
     #sys.stderr.write("\nreturning versionList = " + str(versionList))
 
@@ -344,7 +376,7 @@ def cmd_parse(mainline, path, database):
             pathWalk, fileWalk = os.path.split(fullPathWalk)
 
             versions = find_all_file_versions(mainline, branch, fullPathWalk)
-            #sys.stderr.write("\n[*] \t\tversions = %s" % versions)
+            sys.stderr.write("\n[*] \t\tversions = %s" % versions)
 
             for timestamp, action, origPath, version, author, comment, data in versions:
                 epoch = int(time.mktime(time.strptime(timestamp, "%m/%d/%Y %I:%M %p")))
