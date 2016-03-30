@@ -61,9 +61,6 @@ import shutil
 # temp directory in cwd, holds files fetched from Surround
 scratchDir = "scratch"
 
-# for efficiency, compile the history regex once beforehand
-histRegex = re.compile(r"^(?P<action>[\w]+([^\[\]\r\n]*[\w]+)?)(\[(?P<data>[^\[\]\r\n]*?)( v\. [\d]+)?\]| from \[(?P<from>[^\[\]\r\n]*)\] to \[(?P<to>[^\[\]\r\n]*)\])?([\s]+)(?P<author>[\w]+([^\[\]\r\n]*[\w]+)?)([\s]+)(?P<version>[\d]+)([\s]+)(?P<timestamp>[\w]+[^\[\]\r\n]*)$", re.MULTILINE | re.DOTALL)
-
 # global "mark" number.  incremented before used, as 1 is minimum value allowed.
 mark = 0
 
@@ -107,6 +104,7 @@ actionMap = {"add"                   : Actions.FILE_MODIFY,
              "promote to"            : Actions.FILE_MODIFY,
              "rebase from"           : Actions.FILE_MODIFY,
              "rebase with merge"     : Actions.FILE_MODIFY,
+             "rebase (merged) from"  : Actions.FILE_MODIFY,
              "remove"                : Actions.FILE_DELETE,
              "renamed"               : Actions.FILE_RENAME,
              "repo destroyed"        : None,  # TODO might need to be Actions.FILE_DELETE
@@ -118,6 +116,12 @@ actionMap = {"add"                   : Actions.FILE_MODIFY,
              "rollback rebase"       : Actions.FILE_MODIFY,
              "rollback promote"      : Actions.FILE_MODIFY}
 
+# for efficiency, compile the history regex once beforehand
+histRegex = re.compile(r"^(?P<action>[\w]+([^\[\]\r\n]*[\w]+)?)(\[(?P<data>[^\[\]\r\n]*?)( v\. [\d]+)?\]| from \[(?P<from>[^\[\]\r\n]*)\] to \[(?P<to>[^\[\]\r\n]*)\])?([\s]+)(?P<author>[\w]+([^\[\]\r\n]*[\w]+)?)([\s]+)(?P<version>[\d]+)([\s]+)(?P<timestamp>[\w]+[^\[\]\r\n]*)$", re.MULTILINE | re.DOTALL)
+
+commitEndRegex = re.compile(r"\d+\s+[\d\/]+\s[\d\:]+\s(?:AM|PM)$")
+commitEndWithoutAction = re.compile(r"^[^\s]+\s+\d+\s+[\d\/]+\s[\d\:]+\s(?:AM|PM)$")
+commentStartRegex = re.compile(r"^Comments \- ")
 
 #
 # classes
@@ -206,17 +210,40 @@ def find_all_file_versions(mainline, branch, path):
     cmd = 'sscm history "%s" -b"%s" -p"%s" | tail -n +5' % (file, branch, repo)
     lines = get_lines_from_sscm_cmd(cmd)
 
-    combined = re.split('\|SPLIT\|', re.sub(r"(AM|PM)", r"\1|SPLIT|", "  ".join(lines)))
-    commits = [var for var in combined if var]
-
+    i = 0
+    l = len(lines)
+    commit = {}
     versionList = []
+    commits = []
+
+    while (i < l):
+        line = lines[i].strip()
+        nextLine = lines[i + 1].strip() if i + 1 < l else None
+
+        if commitEndRegex.search(line):
+            if "info" in commit:
+                commit["info"] += " %s" % line
+            else:
+                commit["info"] = line
+
+            commits.append(commit)
+            commit = {}
+        elif commentStartRegex.search(line):
+            commit["comment"] = commentStartRegex.sub("", line, count=1)
+        elif "comment" in commit:
+            if nextLine and commitEndRegex.search(nextLine) and commitEndWithoutAction.search(nextLine):
+                commit["info"] = line
+            else:
+                commit["comment"] += " %s" % line
+        else:
+            commit["info"] = line
+
+        i += 1
 
     for commit in commits:
-        parts = re.split("\s{2,}", commit.strip())
-        l = len(parts)
-        metadata = " ".join(parts[l-4:l])
-
-        result = histRegex.search(metadata)
+        # edge case space before [ e.g: rollback file [to v. 4]
+        commit["info"] = re.sub(r"file \[", r"file[", commit["info"])
+        result = histRegex.search(commit["info"])
         if result:
             action = result.group("action")
             origFile = result.group("from")
@@ -232,12 +259,11 @@ def find_all_file_versions(mainline, branch, path):
                 # we're (possibly) in a branch scenario
                 data = result.group("data")
 
-            if l > 4:
-                comment = " ".join(parts[0:l-4])
-            else:
-                comment = None
+            comment = commit["comment"] if "comment" in commit else None
 
             versionList.append((timestamp, action, result.group("from"), int(version), author, comment, data))
+        else:
+            sys.stderr.write("\nNo match: %s" % commit)
 
     return versionList
 
@@ -267,35 +293,39 @@ def add_record_to_database(record, database):
         c.execute('''UPDATE operations SET origPath=? WHERE action=? AND mainline=? AND branch=? AND path=? AND (origPath IS NULL OR origPath='') AND version<=?''', (record.origPath, Actions.FILE_MODIFY, record.mainline, record.branch, record.path, record.version))
         database.commit()
 
-
 def cmd_parse(mainline, path, database):
     sys.stderr.write("# Beginning parse phase...")
 
-    branches = find_all_branches_in_mainline_containing_path(mainline, path)
+    branches = find_all_branches_in_mainline_containing_path(mainline, path
+    branchIsSnapshot = {}
 
     # NOTE how we're passing branches, not branch.  this is to detect deleted files.
     filesToWalk = find_all_files_in_branches_under_path(mainline, branches, path)
+    sys.stderr.write("\n# Found %d files..." % len(filesToWalk))
 
     for branch in branches:
         sys.stderr.write("\n# Parsing branch '%s' ..." % branch)
 
         for fullPathWalk in filesToWalk:
-            #sys.stderr.write("\n# \tParsing file '%s' ..." % fullPathWalk)
+            sys.stderr.write("\n# \tParsing file '%s' ..." % fullPathWalk)
 
             pathWalk, fileWalk = os.path.split(fullPathWalk)
 
             versions = find_all_file_versions(mainline, branch, fullPathWalk)
-            # sys.stderr.write("\n# \t\tversions = %s" % versions)
+            sys.stderr.write("\n# \t\tversions = %s" % versions)
 
             for timestamp, action, origPath, version, author, comment, data in versions:
                 epoch = int(time.mktime(time.strptime(timestamp, "%m/%d/%Y %I:%M %p")))
                 # branch operations don't follow the actionMap
                 if action == "add to branch":
-                    if is_snapshot_branch(data, pathWalk):
+                    if data not in branchIsSnapshot:
+                        branchIsSnapshot[data] = is_snapshot_branch(data, pathWalk)
+
+                    if branchIsSnapshot[data] == True:
                         branchAction = Actions.BRANCH_SNAPSHOT
                     else:
                         branchAction = Actions.BRANCH_BASELINE
-                    add_record_to_database(DatabaseRecord((epoch, branchAction, mainline, branch, path, None, version, author, comment, data)), database)
+                        add_record_to_database(DatabaseRecord((epoch, branchAction, mainline, branch, path, None, version, author, comment, data)), database)
                 else:
                     if origPath:
                         if action == "renamed":
@@ -352,14 +382,15 @@ def translate_branch_name(name):
     # 9. cannot be the single character @
     if name == "@":
         name = "_"
+    # 10. Cannot contain parens
+    name = re.sub(r'[\(\)]', '', name)
 
     return name
-
 
 # this is the function that prints most file data to the stream
 def print_blob_for_file(branch, fullPath, version=None):
     global mark
-    delim = "EOF"
+    delim = "SSCMFILEDATA"
 
     path, file = os.path.split(fullPath)
     localPath = os.path.join(scratchDir, file)
@@ -371,17 +402,19 @@ def print_blob_for_file(branch, fullPath, version=None):
     else:
         # get newest version
         cmd = 'sscm get "%s" -b"%s" -p"%s" -d"%s" -f -i' % (file, branch, path, scratchDir)
-    with open(os.devnull, 'w') as fnull:
-        subprocess.Popen(cmd, shell=True, stdout=fnull, stderr=fnull).communicate()
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdoutdata, stderrdata = p.communicate()
+
+    invalidFileVersionMatch = re.search(r"^Invalid file version specified!", stderrdata.strip())
 
     mark = mark + 1
     print("blob")
     print("mark :%d" % mark)
-    # print("data %d" % os.path.getsize(localPath))
     # 'data' SP '<<' <delim> LF
     print("data <<%s" % delim)
-    with open(localPath, "rb") as f:
-        print(f.read())
+    if not stderrdata and not invalidFileVersionMatch:
+        with open(localPath, "rb") as f:
+            print(f.read())
     print(delim)
     return mark
 
@@ -548,8 +581,9 @@ def handle_command(parser):
         database = create_database()
         cmd_parse(args.mainline[0], args.path[0], database)
     elif args.command == "export" and args.database:
+        database = sqlite3.connect(args.database[0])
         verify_surround_environment()
-        cmd_export(args.database[0])
+        cmd_export(database)
     elif args.command == "all" and args.mainline and args.path:
         # typical case
         verify_surround_environment()
