@@ -93,6 +93,7 @@ actionMap = {"add"                   : Actions.FILE_MODIFY,
              "checkin"               : Actions.FILE_MODIFY,
              "delete"                : Actions.FILE_DELETE,
              "duplicate"             : Actions.FILE_MODIFY,
+             "duplicate from"        : Actions.FILE_MODIFY,
              "file destroyed"        : Actions.FILE_DELETE,
              "file moved"            : Actions.FILE_RENAME,
              "file renamed"          : Actions.FILE_RENAME,
@@ -259,7 +260,7 @@ def find_all_file_versions(mainline, branch, path):
                 # we're (possibly) in a branch scenario
                 data = result.group("data")
 
-            comment = commit["comment"] if "comment" in commit else None
+            comment = commit["comment"].decode('utf-8') if "comment" in commit else None
 
             versionList.append((timestamp, action, result.group("from"), int(version), author, comment, data))
         else:
@@ -296,7 +297,7 @@ def add_record_to_database(record, database):
 def cmd_parse(mainline, path, database):
     sys.stderr.write("# Beginning parse phase...")
 
-    branches = find_all_branches_in_mainline_containing_path(mainline, path
+    branches = find_all_branches_in_mainline_containing_path(mainline, path)
     branchIsSnapshot = {}
 
     # NOTE how we're passing branches, not branch.  this is to detect deleted files.
@@ -312,7 +313,7 @@ def cmd_parse(mainline, path, database):
             pathWalk, fileWalk = os.path.split(fullPathWalk)
 
             versions = find_all_file_versions(mainline, branch, fullPathWalk)
-            sys.stderr.write("\n# \t\tversions = %s" % versions)
+            # sys.stderr.write("\n# \t\tversions = %s" % versions)
 
             for timestamp, action, origPath, version, author, comment, data in versions:
                 epoch = int(time.mktime(time.strptime(timestamp, "%m/%d/%Y %I:%M %p")))
