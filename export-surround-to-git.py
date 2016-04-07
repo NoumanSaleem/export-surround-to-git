@@ -423,6 +423,8 @@ def print_blob_for_file(branch, fullPath, version=None):
 def process_database_record(record):
     global mark
 
+    comment = record.comment.encode('ascii', 'ignore') if record.comment else None
+
     if record.action == Actions.BRANCH_SNAPSHOT:
         # the basic idea here is to use a "TAG_FIXUP" branch, as recommended in the manpage for git-fast-import.
         # this is necessary since Surround version-controls individual files, and Git controls the state of the entire branch.
@@ -446,9 +448,9 @@ def process_database_record(record):
         # we don't have the legit email addresses, so we just use the author as the email address
         print("author %s <%s> %s %s" % (record.author, record.author, record.timestamp, timezone))
         print("committer %s <%s> %s %s" % (record.author, record.author, record.timestamp, timezone))
-        if record.comment:
-            print("data %d" % len(record.comment))
-            print(record.comment)
+        if comment:
+            print("data %d" % len(comment))
+            print(comment)
         else:
             print("data 0")
 
@@ -466,9 +468,9 @@ def process_database_record(record):
         print("tag %s" % translate_branch_name(record.data))
         print("from TAG_FIXUP")
         print("tagger %s <%s> %s %s" % (record.author, record.author, record.timestamp, timezone))
-        if record.comment:
-            print("data %d" % len(record.comment))
-            print(record.comment)
+        if comment:
+            print("data %d" % len(comment))
+            print(comment)
         else:
             print("data 0")
 
@@ -501,9 +503,9 @@ def process_database_record(record):
         print("mark :%d" % mark)
         print("author %s <%s> %s %s" % (record.author, record.author, record.timestamp, timezone))
         print("committer %s <%s> %s %s" % (record.author, record.author, record.timestamp, timezone))
-        if record.comment:
-            print("data %d" % len(record.comment))
-            print(record.comment)
+        if comment:
+            print("data %d" % len(comment))
+            print(comment)
         else:
             print("data 0")
 
